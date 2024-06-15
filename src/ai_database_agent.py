@@ -1,15 +1,20 @@
 """ @copyright deeplearning.ai  """
 
+import json
 import os 
-from dotenv import load_dotenv
+import numpy as np
 import pandas as pd
+from sqlalchemy import text
 
+from dotenv import load_dotenv
 from langchain.chat_models import AzureChatOpenAI
 from langchain.agents import create_sql_agent
 from langchain.agents.agent_toolkits import SQLDatabaseToolkit
 from langchain.sql_database import SQLDatabase
 from langchain_openai import AzureChatOpenAI
+from openai import AzureOpenAI
 from sqlalchemy import create_engine
+
 
 load_dotenv()
 
@@ -109,35 +114,186 @@ SELECT [death] FROM covidtracking WHERE state = 'TX' AND date LIKE '2020%'"
 
 """
 
-# call the azure chat model and create an sql agent
-llm = AzureChatOpenAI(
-    openai_api_version="2023-05-15",
-    azure_deployment="gpt-4-1106",
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    temperature=0, 
-    max_tokens=500
+# # call the azure chat model and create an sql agent
+# llm = AzureChatOpenAI(
+#     openai_api_version="2023-05-15",
+#     azure_deployment="gpt-4-1106",
+#     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+#     temperature=0, 
+#     max_tokens=500
+# )
+
+# db = SQLDatabase.from_uri(f'sqlite:///{database_file_path}')
+# toolkit = SQLDatabaseToolkit(db=db, llm=llm)
+# QUESTION = """How may patients were hospitalized during October 2020
+# in New York, and nationwide as the total of all states?
+# Use the hospitalizedIncrease column
+# """
+
+# agent_executor_SQL = create_sql_agent(
+#     prefix=MSSQL_AGENT_PREFIX,
+#     format_instructions = MSSQL_AGENT_FORMAT_INSTRUCTIONS,
+#     llm=llm,
+#     toolkit=toolkit,
+#     top_k=30,
+#     verbose=True
+# )
+
+
+# # invoke the sql model
+# agent_executor_SQL.invoke(QUESTION)
+
+
+client = AzureOpenAI(
+  azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"),
+  api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+  api_version="2023-05-15"
 )
 
-db = SQLDatabase.from_uri(f'sqlite:///{database_file_path}')
-toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-QUESTION = """How may patients were hospitalized during October 2020
-in New York, and nationwide as the total of all states?
-Use the hospitalizedIncrease column
-"""
 
-agent_executor_SQL = create_sql_agent(
-    prefix=MSSQL_AGENT_PREFIX,
-    format_instructions = MSSQL_AGENT_FORMAT_INSTRUCTIONS,
-    llm=llm,
-    toolkit=toolkit,
-    top_k=30,
-    verbose=True
+def get_hospitalized_increase_for_state_on_date(state_abbr, specific_date):
+    try:
+        query = f"""
+        SELECT date, hospitalizedIncrease
+        FROM all_states_history
+        WHERE state = '{state_abbr}' AND date = '{specific_date}';
+        """
+        query = text(query)
+
+        with engine.connect() as connection:
+            result = pd.read_sql_query(query, connection)
+        if not result.empty:
+            return result.to_dict('records')[0]
+        else:
+            return np.nan
+    except Exception as e:
+        print(e)
+        return np.nan
+    
+
+def get_positive_cases_for_state_on_date(state_abbr, specific_date):
+    try:
+        query = f"""
+        SELECT date, state, positiveIncrease AS positive_cases
+        FROM all_states_history
+        WHERE state = '{state_abbr}' AND date = '{specific_date}';
+        """
+        query = text(query)
+
+        with engine.connect() as connection:
+            result = pd.read_sql_query(query, connection)
+        if not result.empty:
+            return result.to_dict('records')[0]
+        else:
+            return np.nan
+    except Exception as e:
+        print(e)
+        return np.nan
+
+# execute the function calling against sql database
+tools_sql = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_hospitalized_increase_for_state_on_date",
+            "description": """Retrieves the daily increase in
+                              hospitalizations for a specific state
+                              on a specific date.""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "state_abbr": {
+                        "type": "string",
+                        "description": """The abbreviation of the state
+                                          (e.g., 'NY', 'CA')."""
+                    },
+                    "specific_date": {
+                        "type": "string",
+                        "description": """The specific date for
+                                          the query in 'YYYY-MM-DD'
+                                          format."""
+                    }
+                },
+                "required": ["state_abbr", "specific_date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_positive_cases_for_state_on_date",
+            "description": """Retrieves the daily increase in 
+                              positive cases for a specific state
+                              on a specific date.""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "state_abbr": {
+                        "type": "string",
+                        "description": """The abbreviation of the 
+                                          state (e.g., 'NY', 'CA')."""
+                    },
+                    "specific_date": {
+                        "type": "string",
+                        "description": """The specific date for the
+                                          query in 'YYYY-MM-DD'
+                                          format."""
+                    }
+                },
+                "required": ["state_abbr", "specific_date"]
+            }
+        }
+    }
+]
+
+messages = [
+    {"role": "user",
+     "content": """ how many hospitalized people we had in Alaska
+                    the 2021-03-05?"""
+    }
+]
+
+
+
+response = client.chat.completions.create(
+    model="gpt-4-1106",
+    messages=messages,
+    tools=tools_sql,
+    tool_choice="auto",
 )
 
+response_message = response.choices[0].message
+tool_calls = response_message.tool_calls
 
-# invoke the sql model
-agent_executor_SQL.invoke(QUESTION)
+if tool_calls:
+    print (tool_calls)
+    
+    available_functions = {
+        "get_positive_cases_for_state_on_date": get_positive_cases_for_state_on_date,
+        "get_hospitalized_increase_for_state_on_date":get_hospitalized_increase_for_state_on_date
+    }  
+    messages.append(response_message)  
+   
+    for tool_call in tool_calls:
+        function_name = tool_call.function.name
+        function_to_call = available_functions[function_name]
+        function_args = json.loads(tool_call.function.arguments)
+        function_response = function_to_call(
+            state_abbr=function_args.get("state_abbr"),
+            specific_date=function_args.get("specific_date"),
+        )
+        messages.append(
+            {
+                "tool_call_id": tool_call.id,
+                "role": "tool",
+                "name": function_name,
+                "content": str(function_response),
+            }
+        ) 
+    print(messages)
 
-
-
-
+second_response = client.chat.completions.create(
+            model="gpt-4-1106",
+            messages=messages,
+        )
+print (second_response)
