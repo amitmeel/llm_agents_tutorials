@@ -1,3 +1,4 @@
+""" @copyright deeplearning.ai  """
 
 import os 
 from dotenv import load_dotenv
